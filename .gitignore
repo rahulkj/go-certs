@@ -1,0 +1,33 @@
+# Binaries
+go-certs
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Certificate and key files
+*.crt
+*.pem
+*.key
+*.csr
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+dist/

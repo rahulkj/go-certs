@@ -1,0 +1,67 @@
+version: 2
+
+project_name: go-certs
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+    # you may remove this if you don't need go generate
+    - go generate ./...
+
+builds:
+  - id: go-certs
+    main: ./main.go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    no_unique_dist_dir: true
+    binary: >-
+      {{ .ProjectName }}-
+      {{- .Os }}-
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+
+report_sizes: true
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+      - zip
+    files:
+      - README.md
+
+signs:
+  - artifacts: binary
+    ids:
+      - all
+    output: true
+
+checksum:
+  algorithm: sha256
+  name_template: "{{ .ProjectName }}_checksums.txt"
+  ids:
+    - all
+  disable: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
