@@ -9,6 +9,8 @@ CLI tool for managing TLS certificates - generate, validate, download, and inspe
 - Generate wildcard certificates with automatic root CA
 - Sign server certificates with existing CA
 - Validate certificate chains from local files
+- Validate certificate and private key pairs match
+- Scan folder for certificates and display CN/SAN info
 - Download and validate certificate chains from remote servers
 - Inspect certificate details (including SANs)
 - Support for RSA (2048, 4096) and ECDSA (P-256) keys
@@ -78,6 +80,12 @@ go-certs validate chain --certs server.crt --certs root.crt
 
 # Validate remote certificate chain
 go-certs validate remote --host "example.com" --port 443
+
+# Validate certificate and private key match
+go-certs validate pair --cert server.crt --key server.key
+
+# Scan folder for certificates and display CN/SAN info
+go-certs validate folder --dir ./certs
 ```
 
 ### Download Certificates
@@ -127,9 +135,12 @@ go-certs inspect --cert server.crt
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--certs` | Certificate files (repeatable, required) | - |
-| `--host` | Remote hostname | - |
+| `--certs` | Certificate files (validate chain, repeatable) | - |
+| `--host` | Remote hostname (validate remote) | - |
 | `--port` | Remote port | 443 |
+| `--cert` | Certificate file (validate pair/folder) | - |
+| `--key` | Private key file (validate pair) | - |
+| `--dir` | Directory to scan (validate folder) | - |
 
 ### Download
 

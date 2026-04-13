@@ -27,6 +27,8 @@ var (
 	host       string
 	port       int
 	certFile   string
+	keyFile    string
+	certDir    string
 )
 
 var rootCmd = &cobra.Command{
@@ -455,6 +457,26 @@ Example:
 	RunE: runInspect,
 }
 
+var validatePairCmd = &cobra.Command{
+	Use:   "pair",
+	Short: "Validate certificate and private key match",
+	Long: `Validate that a certificate and private key form a valid pair.
+
+Example:
+  go-certs validate pair --cert server.crt --key server.key`,
+	RunE: runValidatePair,
+}
+
+var scanFolderCmd = &cobra.Command{
+	Use:   "folder",
+	Short: "Scan a folder for certificates and display info",
+	Long: `Scan a folder for all certificate files and display their CN and SAN names.
+
+Example:
+  go-certs validate folder --dir ./certs`,
+	RunE: runScanFolder,
+}
+
 func runInspect(cmd *cobra.Command, args []string) error {
 	if certFile == "" {
 		return fmt.Errorf("certificate file required (use --cert flag)")
@@ -466,6 +488,62 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(cert.InspectCertificate(c))
+	return nil
+}
+
+func runValidatePair(cmd *cobra.Command, args []string) error {
+	if certFile == "" {
+		return fmt.Errorf("certificate file required (use --cert flag)")
+	}
+	if keyFile == "" {
+		return fmt.Errorf("private key file required (use --key flag)")
+	}
+
+	c, err := cert.LoadCertFromFile(certFile)
+	if err != nil {
+		return fmt.Errorf("failed to load certificate: %w", err)
+	}
+
+	key, err := cert.LoadKeyFromFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load private key: %w", err)
+	}
+
+	err = cert.ValidateKeyPair(c, key)
+	if err != nil {
+		return fmt.Errorf("key pair validation failed: %w", err)
+	}
+
+	fmt.Println("Certificate and private key match!")
+	return nil
+}
+
+func runScanFolder(cmd *cobra.Command, args []string) error {
+	if certDir == "" {
+		return fmt.Errorf("directory required (use --dir flag)")
+	}
+
+	certs, err := cert.ScanFolderForCerts(certDir)
+	if err != nil {
+		return fmt.Errorf("failed to scan folder: %w", err)
+	}
+
+	if len(certs) == 0 {
+		fmt.Println("No certificates found in folder")
+		return nil
+	}
+
+	for _, info := range certs {
+		fmt.Printf("\nCN: %s\n", info.CN)
+		if len(info.SANDNSNames) > 0 {
+			fmt.Printf("SAN DNS: %v\n", info.SANDNSNames)
+		}
+		if len(info.SANIPAddrs) > 0 {
+			fmt.Printf("SAN IP: %v\n", info.SANIPAddrs)
+		}
+		fmt.Printf("Valid: %v (Expires: %s)\n", info.Valid, info.Expires.Format("2006-01-02"))
+	}
+
 	return nil
 }
 
@@ -497,6 +575,8 @@ func main() {
 
 	validateCmd.AddCommand(validateChainCmd)
 	validateCmd.AddCommand(validateRemoteCmd)
+	validateCmd.AddCommand(validatePairCmd)
+	validateCmd.AddCommand(scanFolderCmd)
 
 	validateChainCmd.Flags().StringSliceVar(&certFiles, "certs", nil, "Certificate files (repeatable, at least one required)")
 	validateChainCmd.MarkFlagRequired("certs")
@@ -514,6 +594,14 @@ func main() {
 
 	inspectCmd.Flags().StringVar(&certFile, "cert", "", "Certificate file to inspect (required)")
 	inspectCmd.MarkFlagRequired("cert")
+
+	validatePairCmd.Flags().StringVar(&certFile, "cert", "", "Certificate file (required)")
+	validatePairCmd.Flags().StringVar(&keyFile, "key", "", "Private key file (required)")
+	validatePairCmd.MarkFlagRequired("cert")
+	validatePairCmd.MarkFlagRequired("key")
+
+	scanFolderCmd.Flags().StringVar(&certDir, "dir", "", "Directory to scan (required)")
+	scanFolderCmd.MarkFlagRequired("dir")
 
 	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(validateCmd)
