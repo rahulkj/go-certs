@@ -19,6 +19,7 @@ var (
 	outCert    string
 	outKey     string
 	commonName string
+	purpose    string
 	sanDNS     []string
 	sanIP      []string
 	certFiles  []string
@@ -122,6 +123,7 @@ func runGenerateRoot(cmd *cobra.Command, args []string) error {
 		KeySize:    keySize,
 		Days:       days,
 		IsCA:       true,
+		Purpose:    purpose,
 	}
 
 	certPEM, keyPEM, err := cert.GenerateRootCA(opts)
@@ -156,6 +158,7 @@ func runGenerateServer(cmd *cobra.Command, args []string) error {
 		Days:        days,
 		SANDNSNames: sanDNS,
 		SANIPs:      parseIPs(sanIP),
+		Purpose:     purpose,
 	}
 
 	if isWildcard {
@@ -555,6 +558,7 @@ func main() {
 	generateRootCmd.Flags().StringVar(&keyType, "key-type", "rsa", "Key type (rsa, ecdsa)")
 	generateRootCmd.Flags().IntVar(&keySize, "key-size", 2048, "Key size (2048, 4096 for RSA)")
 	generateRootCmd.Flags().IntVar(&days, "days", 365, "Validity period in days")
+	generateRootCmd.Flags().StringVar(&purpose, "purpose", "server", "Certificate purpose (server, client, both)")
 	generateRootCmd.Flags().StringVar(&outCert, "out", "", "Output certificate file")
 	generateRootCmd.Flags().StringVar(&outKey, "key-out", "", "Output private key file")
 	generateRootCmd.MarkFlagRequired("cn")
@@ -563,6 +567,7 @@ func main() {
 	generateServerCmd.Flags().StringVar(&keyType, "key-type", "rsa", "Key type (rsa, ecdsa)")
 	generateServerCmd.Flags().IntVar(&keySize, "key-size", 2048, "Key size (2048, 4096 for RSA)")
 	generateServerCmd.Flags().IntVar(&days, "days", 365, "Validity period in days")
+	generateServerCmd.Flags().StringVar(&purpose, "purpose", "server", "Certificate purpose (server, client, both)")
 	generateServerCmd.Flags().StringVar(&outCert, "out", "", "Output certificate file")
 	generateServerCmd.Flags().StringVar(&outKey, "key-out", "", "Output private key file")
 	generateServerCmd.Flags().StringSliceVar(&sanDNS, "san-dns", nil, "DNS names for SAN (repeatable)")

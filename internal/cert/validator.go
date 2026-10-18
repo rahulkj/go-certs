@@ -132,14 +132,20 @@ func SaveCertificateChain(chain CertChain, prefix string) error {
 }
 
 func InspectCertificate(cert *x509.Certificate) string {
-	dnsNames, ipAddrs := parseSANFromCert(cert)
+	var ipAddrs []string
+	for _, ip := range cert.IPAddresses {
+		ipAddrs = append(ipAddrs, ip.String())
+	}
 	return fmt.Sprintf(`Subject: %s
 Issuer: %s
 Serial Number: %s
 Valid From: %s
 Valid Until: %s
 Key Usage: %v
+Extended Key Usage: %v
 Is CA: %v
+Basic Constraints Valid: %v
+Subject Key Identifier: %x
 DNS Names: %v
 IP Addresses: %v`,
 		cert.Subject.CommonName,
@@ -148,8 +154,11 @@ IP Addresses: %v`,
 		cert.NotBefore.Format(time.RFC3339),
 		cert.NotAfter.Format(time.RFC3339),
 		cert.KeyUsage,
+		cert.ExtKeyUsage,
 		cert.IsCA,
-		dnsNames,
+		cert.BasicConstraintsValid,
+		cert.SubjectKeyId,
+		cert.DNSNames,
 		ipAddrs,
 	)
 }

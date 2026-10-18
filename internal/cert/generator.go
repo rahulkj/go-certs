@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -33,81 +32,154 @@ type CertOptions struct {
 	KeySize     int
 	Days        int
 	IsCA        bool
+	Purpose     string // "server" (default), "client", or "both"
+}
+
+func normalizedDays(days int) int {
+	if days <= 0 {
+		return 365
+	}
+	return days
+}
+
+func normalizedKeyType(kt KeyType) KeyType {
+	if kt == "" {
+		return KeyTypeRSA
+	}
+	return kt
 }
 
 func GenerateKey(keyType KeyType, keySize int) (crypto.PrivateKey, error) {
+	keyType = normalizedKeyType(keyType)
 	switch keyType {
 	case KeyTypeRSA:
 		if keySize == 0 {
 			keySize = 2048
 		}
+		if keySize < 2048 {
+			keySize = 2048
+		}
 		return rsa.GenerateKey(rand.Reader, keySize)
 	case KeyTypeECDSA:
-		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		switch {
+		case keySize >= 521:
+			return ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+		case keySize >= 384:
+			return ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		default:
+			return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		}
 	default:
 		return rsa.GenerateKey(rand.Reader, 2048)
 	}
 }
 
+// subjectKeyIdentifier derives a stable key identifier for a public key.
+func subjectKeyIdentifier(pub crypto.PublicKey) []byte {
+	b, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		h := sha256.Sum256([]byte(fmt.Sprintf("%T", pub)))
+		return h[:20]
+	}
+	h := sha256.Sum256(b)
+	return h[:20]
+}
+
+func extendedKeyUsages(purpose string) []x509.ExtKeyUsage {
+	switch purpose {
+	case "client":
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	case "both":
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	default:
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	}
+}
+
+func keyUsageForCert(isCA bool, key crypto.PrivateKey) x509.KeyUsage {
+	if isCA {
+		return x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+	}
+	ku := x509.KeyUsageDigitalSignature
+	if _, ok := key.(*rsa.PrivateKey); ok {
+		ku |= x509.KeyUsageKeyEncipherment
+	}
+	return ku
+}
+
+func containsStr(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIP(slice []net.IP, item net.IP) bool {
+	for _, ip := range slice {
+		if ip.Equal(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildDNSNames(opts CertOptions) []string {
+	dnsNames := append([]string{}, opts.SANDNSNames...)
+	if opts.CommonName != "" && net.ParseIP(opts.CommonName) == nil {
+		if !containsStr(dnsNames, opts.CommonName) {
+			dnsNames = append(dnsNames, opts.CommonName)
+		}
+	}
+	return dnsNames
+}
+
+func buildIPs(opts CertOptions) []net.IP {
+	ips := append([]net.IP{}, opts.SANIPs...)
+	if opts.CommonName != "" {
+		if ip := net.ParseIP(opts.CommonName); ip != nil {
+			if !containsIP(ips, ip) {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	return ips
+}
+
 func CreateTemplate(opts CertOptions) (*x509.Certificate, error) {
+	days := normalizedDays(opts.Days)
+	notBefore := time.Now().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(days) * 24 * time.Hour)
+
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
-
-	notBefore := time.Now()
-	notAfter := notBefore.Add(time.Duration(opts.Days) * 24 * time.Hour)
 
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName: opts.CommonName,
 		},
-		NotBefore: notBefore,
-		NotAfter:  notAfter,
-		KeyUsage:  x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		BasicConstraintsValid: true,
 	}
 
 	if opts.IsCA {
 		template.IsCA = true
 		template.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
-		template.BasicConstraintsValid = true
-		template.MaxPathLen = 0
+		template.MaxPathLen = -1
+	} else {
+		template.KeyUsage = x509.KeyUsageDigitalSignature
+		template.ExtKeyUsage = extendedKeyUsages(opts.Purpose)
 	}
 
-	if len(opts.SANDNSNames) > 0 || len(opts.SANIPs) > 0 {
-		template.ExtraExtensions = []pkix.Extension{
-			{
-				Id:    []int{2, 5, 29, 17},
-				Value: marshalSAN(opts.SANDNSNames, opts.SANIPs),
-			},
-		}
-	}
+	template.DNSNames = buildDNSNames(opts)
+	template.IPAddresses = buildIPs(opts)
 
 	return template, nil
-}
-
-func marshalSAN(dnsNames []string, ips []net.IP) []byte {
-	var rawValues []asn1.RawValue
-
-	for _, name := range dnsNames {
-		rawValues = append(rawValues, asn1.RawValue{
-			Tag:   2, // DNS
-			Bytes: []byte(name),
-		})
-	}
-	for _, ip := range ips {
-		rawValues = append(rawValues, asn1.RawValue{
-			Tag:   7, // IP
-			Bytes: ip,
-		})
-	}
-
-	bs, err := asn1.Marshal(rawValues)
-	if err != nil {
-		return nil
-	}
-	return bs
 }
 
 func GenerateRootCA(opts CertOptions) ([]byte, []byte, error) {
@@ -116,17 +188,23 @@ func GenerateRootCA(opts CertOptions) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to generate key: %w", err)
 	}
 
+	days := normalizedDays(opts.Days)
+	notBefore := time.Now().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(days) * 24 * time.Hour)
+
+	ski := subjectKeyIdentifier(getPublicKey(key))
+
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			CommonName: opts.CommonName,
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(time.Duration(opts.Days) * 24 * time.Hour),
+		SerialNumber:          nil,
+		Subject:               pkix.Name{CommonName: opts.CommonName},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		MaxPathLen:            0,
+		MaxPathLen:            -1,
+		SubjectKeyId:          ski,
+		AuthorityKeyId:         ski,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, getPublicKey(key), key)
@@ -149,31 +227,29 @@ func GenerateLeafCertificate(opts CertOptions, parentCert *x509.Certificate, par
 		return nil, nil, fmt.Errorf("failed to generate key: %w", err)
 	}
 
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
+	days := normalizedDays(opts.Days)
+	notBefore := time.Now().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(days) * 24 * time.Hour)
+
+	ski := subjectKeyIdentifier(getPublicKey(key))
+
+	dnsNames := buildDNSNames(opts)
+	ipAddrs := buildIPs(opts)
+
+	keyUsage := keyUsageForCert(false, key)
 
 	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: opts.CommonName,
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(time.Duration(opts.Days) * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		SerialNumber:          nil,
+		Subject:               pkix.Name{CommonName: opts.CommonName},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           extendedKeyUsages(opts.Purpose),
 		BasicConstraintsValid: true,
-		DNSNames:              opts.SANDNSNames,
-	}
-
-	if len(opts.SANDNSNames) > 0 || len(opts.SANIPs) > 0 {
-		template.ExtraExtensions = []pkix.Extension{
-			{
-				Id:    []int{2, 5, 29, 17},
-				Value: marshalSAN(opts.SANDNSNames, opts.SANIPs),
-			},
-		}
+		IsCA:                  false,
+		SubjectKeyId:          ski,
+		DNSNames:              dnsNames,
+		IPAddresses:           ipAddrs,
 	}
 
 	var parent *x509.Certificate
@@ -181,10 +257,14 @@ func GenerateLeafCertificate(opts CertOptions, parentCert *x509.Certificate, par
 	if parentCert != nil {
 		parent = parentCert
 		signer = parentKey
-		template.AuthorityKeyId = parentCert.SubjectKeyId
+		if len(parent.SubjectKeyId) == 0 {
+			parent.SubjectKeyId = subjectKeyIdentifier(parent.PublicKey)
+		}
+		template.AuthorityKeyId = parent.SubjectKeyId
 	} else {
 		parent = template
 		signer = key
+		template.AuthorityKeyId = ski
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, parent, getPublicKey(key), signer)
@@ -216,6 +296,9 @@ func GenerateWildcardCertificate(domain string, opts CertOptions) (*WildcardCert
 		Days:       opts.Days,
 		IsCA:       true,
 	}
+	if rootCAOpts.Days <= 0 {
+		rootCAOpts.Days = 365
+	}
 
 	rootCertPEM, rootKeyPEM, err := GenerateRootCA(rootCAOpts)
 	if err != nil {
@@ -244,24 +327,27 @@ func GenerateWildcardCertificate(domain string, opts CertOptions) (*WildcardCert
 		return nil, fmt.Errorf("failed to generate server key: %w", err)
 	}
 
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
+	days := normalizedDays(opts.Days)
+	notBefore := time.Now().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(days) * 24 * time.Hour)
+
+	ski := subjectKeyIdentifier(getPublicKey(serverKey))
 
 	aki := authorityKeyIdentifierFromCert(rootCert)
 
+	keyUsage := keyUsageForCert(false, serverKey)
+
 	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: wildcardCN,
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(time.Duration(opts.Days) * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		SerialNumber:          nil,
+		Subject:               pkix.Name{CommonName: wildcardCN},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           extendedKeyUsages(opts.Purpose),
 		BasicConstraintsValid: true,
+		IsCA:                  false,
 		AuthorityKeyId:        aki,
+		SubjectKeyId:          ski,
 		DNSNames:              dnsNames,
 	}
 
@@ -288,12 +374,11 @@ func authorityKeyIdentifierFromCert(cert *x509.Certificate) []byte {
 	if len(cert.SubjectKeyId) > 0 {
 		return cert.SubjectKeyId
 	}
-	hash := sha256.Sum256(cert.Raw)
-	return hash[:]
+	return subjectKeyIdentifier(cert.PublicKey)
 }
 
 func GenerateSANCertificate(opts CertOptions) ([]byte, []byte, error) {
-	if opts.CommonName != "" && !contains(opts.SANDNSNames, opts.CommonName) {
+	if opts.CommonName != "" && !containsStr(opts.SANDNSNames, opts.CommonName) && net.ParseIP(opts.CommonName) == nil {
 		opts.SANDNSNames = append(opts.SANDNSNames, opts.CommonName)
 	}
 
@@ -302,29 +387,30 @@ func GenerateSANCertificate(opts CertOptions) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to generate key: %w", err)
 	}
 
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
+	days := normalizedDays(opts.Days)
+	notBefore := time.Now().Add(-5 * time.Minute)
+	notAfter := notBefore.Add(time.Duration(days) * 24 * time.Hour)
+
+	ski := subjectKeyIdentifier(getPublicKey(key))
+
+	dnsNames := buildDNSNames(opts)
+	ipAddrs := buildIPs(opts)
+
+	keyUsage := keyUsageForCert(false, key)
 
 	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: opts.CommonName,
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(time.Duration(opts.Days) * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		SerialNumber:          nil,
+		Subject:               pkix.Name{CommonName: opts.CommonName},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           extendedKeyUsages(opts.Purpose),
 		BasicConstraintsValid: true,
-	}
-
-	if len(opts.SANDNSNames) > 0 || len(opts.SANIPs) > 0 {
-		template.ExtraExtensions = []pkix.Extension{
-			{
-				Id:    []int{2, 5, 29, 17},
-				Value: marshalSAN(opts.SANDNSNames, opts.SANIPs),
-			},
-		}
+		IsCA:                  false,
+		SubjectKeyId:          ski,
+		AuthorityKeyId:        ski,
+		DNSNames:              dnsNames,
+		IPAddresses:           ipAddrs,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, getPublicKey(key), key)
@@ -342,22 +428,9 @@ func GenerateSANCertificate(opts CertOptions) ([]byte, []byte, error) {
 }
 
 func encodePrivateKey(key interface{}) ([]byte, error) {
-	var keyBytes []byte
-	var err error
-
-	switch k := key.(type) {
-	case *rsa.PrivateKey:
-		keyBytes, err = x509.MarshalPKCS8PrivateKey(k)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal RSA key: %w", err)
-		}
-	case *ecdsa.PrivateKey:
-		keyBytes, err = x509.MarshalECPrivateKey(k)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal ECDSA key: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported key type")
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal private key: %w", err)
 	}
 
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
@@ -381,16 +454,24 @@ func LoadPrivateKeyFromFile(path string) (crypto.PrivateKey, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM")
 	}
-	return x509.ParsePKCS8PrivateKey(block.Bytes)
+
+	// Try PKCS#8 first.
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	// PKCS#1 RSA.
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	// SEC1 EC.
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("failed to parse private key from %s", path)
 }
 
 func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+	return containsStr(slice, item)
 }
 
 func getPublicKey(key crypto.PrivateKey) crypto.PublicKey {
